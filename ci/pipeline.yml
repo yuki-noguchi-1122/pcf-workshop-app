@@ -69,6 +69,8 @@ jobs:
           ln -fs $(pwd)/m2 ~/.m2
           mvn clean package
   - put: deploy-to-cf
+    inputs:
+    - name: pcfapp
     params: 
       manifest: pcfapp/manifest.yml
       current_app_name: pcfapp-instructor
