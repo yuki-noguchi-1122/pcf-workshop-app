@@ -1,0 +1,19 @@
+---
+platform: linux
+
+image_resource:
+  type: docker-image
+  source:
+    repository: java
+
+inputs:
+  - name: pcfdemoapp
+
+caches:
+  - path: pcfdemoapp/m2
+
+run:
+  path: pcfdemoapp/ci/tasks/unit.sh
+  args: [
+    --input-dir, pcfdemoapp
+  ]

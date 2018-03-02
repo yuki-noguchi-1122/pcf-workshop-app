@@ -1,0 +1,196 @@
+---
+resource_types:
+  - name: google-cloud-storage
+    type: docker-image
+    source:
+      repository: frodenas/gcs-resource
+
+resources:
+  - name: pcfdemoapp
+    type: git
+    source:
+      uri: {{github-uri}}
+      branch: {{github-branch}}
+    check_every: 10s
+
+  - name: version
+    type: semver
+    source:
+      driver: git
+      uri: git@github.com:tkaburagi1214/pcfdemoapp-version.git
+      branch: master
+      private_key: ((github-private-key))
+      file: version
+
+  - name: candidate-release
+    type: google-cloud-storage
+    source:
+      bucket: {{gcs-bucket-release-candidates}}
+      regexp: demo-(.*).jar
+      json_key: {{gcs-key}}
+
+  - name: final-release
+    type: google-cloud-storage
+    source:
+      bucket: {{gcs-bucket-releases}}
+      regexp: pcfdemoapp-(.*).jar
+      json_key: {{gcs-key}}
+
+  - name: cf-staging
+    type: cf
+    source:
+      api: {{cf-api}}
+      username: {{cf-username}}
+      password: {{cf-password}}
+      organization: {{cf-org}}
+      space: {{cf-space-staging}}
+      skip_cert_check: true
+
+  - name: cf-production
+    type: cf
+    source:
+      api: {{cf-api}}
+      username: {{cf-username}}
+      password: {{cf-password}}
+      organization: {{cf-org}}
+      space: {{cf-space-prod}}
+      skip_cert_check: true
+
+jobs:
+  - name: unit-test
+    public: true
+    plan:
+      - get: pcfdemoapp
+        trigger: true
+      - task: unit
+        file: pcfdemoapp/ci/tasks/unit.yml
+
+  - name: build-artifact
+    serial_groups: [ version ]
+    plan:
+      - get: pcfdemoapp
+        passed: [ unit-test ]
+        trigger: true
+      - get: version
+        params: { pre: rc }
+      - task: build
+        file: pcfdemoapp/ci/tasks/build.yml
+      - put: candidate-release
+        params: { file: build/demo-*.jar }
+      - put: version
+        params: { file: version/number }
+
+  - name: integration-test
+    serial: true
+    plan:
+      - get: candidate-release
+        trigger: true
+        passed: [ build-artifact ]
+      - get: pcfdemoapp
+        passed: [ build-artifact ]
+      - get: version
+        passed: [ build-artifact ]
+      - task: prepare-integration
+        file: pcfdemoapp/ci/tasks/prepare-integration.yml
+        params:
+          CF_MANIFEST_HOST: {{cf-manifest-host-staging}}
+      - put: cf-staging
+        params:
+          manifest: prepare-integration/manifest-staging.yml
+      - task: integration
+        file: pcfdemoapp/ci/tasks/integration.yml
+
+  - name: load-test
+    serial: true
+    plan:
+      - get: candidate-release
+        passed: [ integration-test ]
+        trigger: true
+      - get: pcfdemoapp
+        passed: [ integration-test ]
+        trigger: true
+      - task: load-test
+        config:
+            platform: linux
+            image_resource:
+              type: docker-image
+              source:
+                repository: appropriate/curl
+            run:
+              path: sh
+              args:
+              - -c
+              - |
+                 sleep 10
+                 i=0
+                 while [[ $i -ne 10 ]]; do
+                   code=`curl -LI http://pcfdemoapp-staging.apps.kabdev.xyz -o /dev/null -w '%{http_code}\n' -s`;
+                   if [[ ${code} = "200" ]]; then
+                       echo ${code};
+                     echo "ok";
+                   else
+                     echo "abort!!";
+                     exit 1
+                   fi
+                   i=`expr $i + 1`;
+                   sleep 1;
+                 done
+
+  - name: ship-it
+    serial_groups: [ version ]
+    plan:
+      - get: candidate-release
+        passed: [ load-test ]
+        trigger: true
+      - get: pcfdemoapp
+        passed: [ load-test ]
+        trigger: true
+      - get: version
+        params: { bump: final }
+      - task: prepare-final
+        file: pcfdemoapp/ci/tasks/prepare-final.yml
+      - put: final-release
+        params: { file: prepare-final/pcfdemoapp-*.jar }
+      - put: version
+        params: { file: version/number }      
+
+  - name: promotion
+    serial: true
+    plan:
+      - get: final-release
+        trigger: true
+        passed: [ship-it]
+      - get: pcfdemoapp
+        passed: [ship-it]
+        trigger: true
+      - get: version
+        passed: [ ship-it ]
+      - task: make-manifest
+        file: pcfdemoapp/ci/tasks/make-manifest.yml
+        params:
+          CF_MANIFEST_HOST: {{cf-manifest-host-prod}}
+      - put: cf-production
+        params: 
+          manifest: makemanifest/manifest-production.yml
+          current_app_name: pcfdemoapp
+
+  - name: major
+    serial_groups: [ version ]
+    plan:
+      - put: version
+        params: { bump: major, pre: rc }
+
+  - name: minor
+    serial_groups: [ version ]
+    plan:
+      - put: version
+        params: { bump: minor, pre: rc }
+
+  - name: bump-version
+    serial_groups: [ version ]
+    plan:
+      - get: version
+        passed: [ ship-it ]
+        trigger: true
+      - put: version
+        params: { bump: patch, pre: rc }
