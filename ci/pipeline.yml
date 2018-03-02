@@ -62,6 +62,7 @@ jobs:
         args:
         - -c
         - |
+          ls -ltR
           set -e
           cd pcfapp
           rm -rf ~/.m2
@@ -70,4 +71,4 @@ jobs:
   - put: deploy-to-cf
     params: 
       manifest: pcfapp/manifest.yml
-      current_app_name: pcfdapp-instructor
+      current_app_name: pcfapp-instructor
